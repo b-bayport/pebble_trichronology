@@ -88,6 +88,7 @@ static int16_t s_orbit_inset = 150;
 static int s_background_color_index = 0;
 static int s_face_color_index = 0;
 static int s_hand_color_index = 0;
+static uint8_t s_battery_percent = 100;
 
 static GColor background_color() {
 #if defined(PBL_COLOR)
@@ -200,17 +201,8 @@ static void update_time()
 }
 static void battery_handler(BatteryChargeState charge_state)
 {
-  static char s_battery_buffer[16];
-
-  if (charge_state.is_charging)
-  {
-    snprintf(s_battery_buffer, sizeof(s_battery_buffer), "%d", charge_state.charge_percent);
-  }
-  else
-  {
-    snprintf(s_battery_buffer, sizeof(s_battery_buffer), "%d", charge_state.charge_percent);
-  }
-  text_layer_set_text(s_battery_layer, s_battery_buffer);
+  s_battery_percent = charge_state.charge_percent;
+  layer_mark_dirty(s_face_layer);
 }
 
 static void update_frame_location()
@@ -258,31 +250,25 @@ static void my_hand_draw(Layer *layer, GContext *ctx)
   graphics_context_set_fill_color(ctx, hand_color());
 
   GPoint center = GPoint(face_frame.origin.x + face_frame.size.w / 2, face_frame.origin.y + face_frame.size.h / 2);
-  GPoint end_point = gpoint_from_polar(face_frame, GOvalScaleModeFitCircle, DEG_TO_TRIGANGLE(angle));
+  int32_t trig_angle = DEG_TO_TRIGANGLE(angle);
+  GPoint end_point = GPoint(
+      center.x + (int16_t)(360 * sin_lookup(trig_angle) / TRIG_MAX_RATIO),
+      center.y - (int16_t)(360 * cos_lookup(trig_angle) / TRIG_MAX_RATIO));
 
   int32_t perp_angle = DEG_TO_TRIGANGLE(angle);
-  int32_t perp_thickness = (int32_t)(
-#if PBL_DISPLAY_WIDTH == 260
-      5
-#else
-      3
-#endif
-      * s_scale);
-  if (perp_thickness < 1)
-    perp_thickness = 1;
+  int32_t perp_thickness = 12;
 
   GPoint offset = {
       .x = (int16_t)(perp_thickness * cos_lookup(perp_angle) / TRIG_MAX_RATIO),
       .y = (int16_t)(perp_thickness * sin_lookup(perp_angle) / TRIG_MAX_RATIO)};
 
-  GPoint hand_points[4] = {
+  GPoint hand_points[3] = {
       {center.x - offset.x, center.y - offset.y},
       {center.x + offset.x, center.y + offset.y},
-      {end_point.x + offset.x, end_point.y + offset.y},
-      {end_point.x - offset.x, end_point.y - offset.y}};
+      {end_point.x, end_point.y}};
 
   GPath *hand_path = gpath_create(&(GPathInfo){
-      .num_points = 4,
+      .num_points = 3,
       .points = hand_points});
 
   gpath_draw_filled(ctx, hand_path);
@@ -293,6 +279,10 @@ static void my_face_draw(Layer *layer, GContext *ctx)
 {
   GRect bounds = layer_get_bounds(layer);
   const int16_t half_h = bounds.size.h / 2;
+
+  time_t now = time(NULL);
+  struct tm *current_time = localtime(&now);
+  float current_hour_angle = 30.0f * ((float)(current_time->tm_hour % 12) + ((float)current_time->tm_min / 60.0f));
   const int16_t circle_radius = (int16_t)(90 * s_scale);
   const int16_t number_inset = (int16_t)(60 * s_scale);
   const int16_t hour_inset = (int16_t)(30 * s_scale);
@@ -380,6 +370,43 @@ static void my_face_draw(Layer *layer, GContext *ctx)
                          gpoint_from_polar(grect_crop(bounds, line_length), GOvalScaleModeFitCircle, angle),
                          gpoint_from_polar(bounds, GOvalScaleModeFitCircle, angle));
     }
+  }
+
+#if PBL_DISPLAY_WIDTH == 200
+  GRect arc_rect = grect_inset(bounds, GEdgeInsets(-5));
+#else
+  GRect arc_rect = grect_inset(bounds, GEdgeInsets(15));
+#endif
+#if defined(PBL_COLOR)
+  GColor arc_color = s_battery_percent >= 90 ? GColorWhite :
+                     s_battery_percent >= 50 ? GColorYellow : GColorRed;
+#else
+  GColor arc_color = face_text_color();
+#endif
+  graphics_context_set_stroke_color(ctx, arc_color);
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_draw_arc(ctx, arc_rect, GOvalScaleModeFitCircle,
+                    DEG_TO_TRIGANGLE(current_hour_angle - 8.0f),
+                    DEG_TO_TRIGANGLE(current_hour_angle));
+
+  static char date_buf[10];
+  strftime(date_buf, sizeof(date_buf), "%d %b", current_time);
+
+  GFont date_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  graphics_context_set_text_color(ctx, face_text_color());
+  int16_t date_radius = arc_rect.size.w / 2 + 10;
+  int num_chars = (int)strlen(date_buf);
+  float char_step = 1.5f;
+  float date_start = current_hour_angle - 8.0f - (num_chars - 1) * char_step / 2.0f;
+  for (int i = 0; i < num_chars; i++) {
+    char ch[2] = {date_buf[i], '\0'};
+    int32_t ch_trig = DEG_TO_TRIGANGLE(date_start + i * char_step);
+    GPoint ch_pos = GPoint(
+        half_h + (int16_t)(date_radius * sin_lookup(ch_trig) / TRIG_MAX_RATIO),
+        half_h - (int16_t)(date_radius * cos_lookup(ch_trig) / TRIG_MAX_RATIO));
+    graphics_draw_text(ctx, ch, date_font,
+                       GRect(ch_pos.x - 10, ch_pos.y - 11, 20, 22),
+                       GTextOverflowModeFill, GTextAlignmentCenter, NULL);
   }
 }
 
@@ -505,6 +532,9 @@ static void init()
 
   // Show the Window on the watch, with animated=true
   window_stack_push(s_main_window, true);
+
+  BatteryChargeState initial_battery = battery_state_service_peek();
+  s_battery_percent = initial_battery.charge_percent;
 
   // Make sure the time is displayed from the start
   update_time();

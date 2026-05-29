@@ -1,7 +1,10 @@
 {
   "name": "Chronology",
-  "author": "Artifact",
-  "version": "2.2.0",
+  "author": "bayport",
+  "contributors": [
+    "Artifact"
+  ],
+  "version": "1.0.0",
   "keywords": [
     "pebble-watchface"
   ],
